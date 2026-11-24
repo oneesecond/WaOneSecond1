@@ -12,7 +12,7 @@ jobs:
       ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
 
     steps:
-      # 1. Checkout repository
+      # 1. Download repository
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -27,12 +27,6 @@ jobs:
       - name: Detect Android SDK
         run: |
           echo "ANDROID_HOME=$ANDROID_HOME"
-          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
-
-          if [ ! -d "$ANDROID_HOME" ]; then
-            echo "Android SDK directory not found"
-            exit 1
-          fi
 
           SDKMANAGER=$(find "$ANDROID_HOME" \
             -name sdkmanager \
@@ -40,15 +34,14 @@ jobs:
 
           if [ -z "$SDKMANAGER" ]; then
             echo "sdkmanager not found"
-            find "$ANDROID_HOME" -maxdepth 5 -type f
             exit 1
           fi
 
-          echo "SDKMANAGER=$SDKMANAGER" >> "$GITHUB_ENV"
+          echo "SDKMANAGER=$SDKMAN" >> "$GITHUB_ENV"
           echo "$(dirname "$SDKMANAGER")" >> "$GITHUB_PATH"
           echo "$ANDROID_HOME/platform-tools" >> "$GITHUB_PATH"
 
-      # 4. Install Android SDK
+      # 4. Install SDK
       - name: Install Android SDK packages
         run: |
           yes | "$SDKMANAGER" --licenses || true
@@ -63,25 +56,35 @@ jobs:
         with:
           gradle-version: '8.7'
 
-      # 6. Locate Android project
+      # 6. Extract project ZIP
+      - name: Extract Android project
+        run: |
+          ZIP="WA-OneSecond-Android-Project.zip"
+
+          if [ ! -f "$ZIP" ]; then
+            echo "Project ZIP not found: $ZIP"
+            ls -la
+            exit 1
+          fi
+
+          mkdir -p extracted
+          unzip -o "$ZIP" -d extracted
+
+          echo "Extracted files:"
+          find extracted -maxdepth 5 -type f | sort
+
+      # 7. Locate Gradle project
       - name: Locate Gradle project
         run: |
-          echo "Searching for Android project..."
-
-          echo "Repository structure:"
-          find . -maxdepth 5 -type f | sort
-
-          APP_BUILD=$(find . -type f \
+          APP_BUILD=$(find extracted -type f \
             \( -path '*/app/build.gradle' \
             -o -path '*/app/build.gradle.kts' \) \
-            -not -path './.git/*' \
             | head -1)
 
           if [ -z "$APP_BUILD" ]; then
-            echo "ERROR: app/build.gradle not found"
+            echo "app/build.gradle not found"
 
-            echo "Searching all Gradle files:"
-            find . -type f \
+            find extracted -type f \
               \( -name build.gradle \
               -o -name build.gradle.kts \
               -o -name settings.gradle \
@@ -93,77 +96,47 @@ jobs:
           APP_DIR=$(dirname "$APP_BUILD")
           PROJECT_DIR=$(dirname "$APP_DIR")
 
-          echo "App directory: $APP_DIR"
-          echo "Project directory: $PROJECT_DIR"
+          echo "APP_DIR=$APP_DIR"
+          echo "PROJECT_DIR=$PROJECT_DIR"
 
-          # Create settings.gradle if missing
           if [ ! -f "$PROJECT_DIR/settings.gradle" ] \
             && [ ! -f "$PROJECT_DIR/settings.gradle.kts" ]; then
 
-            echo "Creating settings.gradle"
-
-            cat > "$PROJECT_DIR/settings.gradle" <<'EOF'
-          pluginManagement {
-              repositories {
-                  google()
-                  mavenCentral()
-                  gradlePluginPortal()
-              }
-          }
-
-          dependencyResolutionManagement {
-              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
-              repositories {
-                  google()
-                  mavenCentral()
-              }
-          }
-
-          rootProject.name = "WAOneSecond"
-          include ':app'
-          EOF
+            echo "settings.gradle missing"
+            exit 1
           fi
 
-          # Validate project root
           if [ ! -f "$PROJECT_DIR/build.gradle" ] \
             && [ ! -f "$PROJECT_DIR/build.gradle.kts" ]; then
 
-            echo "Root build.gradle not found"
-            echo "Project: $PROJECT_DIR"
-
+            echo "Root build.gradle missing"
             exit 1
           fi
 
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
-      # 7. Build APK
+      # 8. Build APK
       - name: Build APK
         run: |
-          echo "Building project: $PROJECT_DIR"
-
           cd "$PROJECT_DIR"
 
           gradle assembleDebug --no-daemon
 
-      # 8. Verify APK
+      # 9. Verify APK
       - name: Verify APK
         run: |
           APK="$PROJECT_DIR/app/build/outputs/apk/debug/app-debug.apk"
 
           if [ ! -f "$APK" ]; then
-            echo "APK not found!"
-
-            find "$PROJECT_DIR" \
-              -type f \
-              -name "*.apk"
-
+            echo "APK not generated"
+            find "$PROJECT_DIR" -name "*.apk"
             exit 1
           fi
 
           echo "APK successfully generated:"
           ls -lh "$APK"
 
-      # 9. Upload APK
+      # 10. Upload APK
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
