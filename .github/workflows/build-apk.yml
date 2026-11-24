@@ -12,52 +12,123 @@ jobs:
     timeout-minutes: 30
 
     env:
+      ANDROID_HOME: /usr/local/lib/android/sdk
+      ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
       JAVA_VERSION: '17'
-      ANDROID_PLATFORM: '35'
-      BUILD_TOOLS_VERSION: '35.0.0'
 
     steps:
-      # 1. Checkout repository
+      # 1. Checkout
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 2. Java
-      - name: Setup Java 17
+      # 2. Java 17
+      - name: Setup Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
-      # 3. Android SDK
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-
-      # 4. Accept SDK licenses
-      - name: Accept Android licenses
-        run: |
-          set -e
-          yes | sdkmanager --licenses || true
-
-      # 5. Install required SDK
-      - name: Install Android SDK packages
+      # 3. Detect SDK
+      - name: Detect Android SDK
+        shell: bash
         run: |
           set -e
 
-          sdkmanager --install \
-            "platform-tools" \
-            "platforms;android-${ANDROID_PLATFORM}" \
-            "build-tools;${BUILD_TOOLS_VERSION}"
+          SDK="$ANDROID_HOME"
 
-          sdkmanager --list_installed
+          if [ ! -d "$SDK" ]; then
+            echo "Android SDK directory not found: $SDK"
+            exit 1
+          fi
 
-      # 6. Gradle
+          SDKMANAGER=$(find "$SDK" \
+            -type f \
+            -name sdkmanager \
+            | head -n 1)
+
+          if [ -z "$SDKMANAGER" ]; then
+            echo "sdkmanager not found"
+            find "$SDK" -maxdepth 5 -type f
+            exit 1
+          fi
+
+          echo "SDK: $SDK"
+          echo "SDKMANAGER: $SDKMANAGER"
+
+          echo "SDKMANAGER=$SDKMANAGER" >> "$GITHUB_ENV"
+          echo "$(dirname "$SDKMANAGER")" >> "$GITHUB_PATH"
+          echo "$SDK/platform-tools" >> "$GITHUB_PATH"
+
+      # 4. Android SDK licenses
+      - name: Accept SDK licenses
+        shell: bash
+        run: |
+          set -e
+
+          "$SDKMANAGER" \
+            --sdk_root="$ANDROID_HOME" \
+            --licenses < /dev/null || true
+
+          yes | "$SDKMANAGER" \
+            --sdk_root="$ANDROID_HOME" \
+            --licenses || true
+
+      # 5. Install SDK platform
+      - name: Install Android Platform 35
+        shell: bash
+        run: |
+          set -e
+
+          "$SDKMANAGER" \
+            --sdk_root="$ANDROID_HOME" \
+            --install "platforms;android-35"
+
+      # 6. Install Build Tools
+      - name: Install Android Build Tools
+        shell: bash
+        run: |
+          set -e
+
+          "$SDKMANAGER" \
+            --sdk_root="$ANDROID_HOME" \
+            --install "build-tools;35.0.0"
+
+      # 7. Install Platform Tools
+      - name: Install Platform Tools
+        shell: bash
+        run: |
+          set -e
+
+          "$SDKMANAGER" \
+            --sdk_root="$ANDROID_HOME" \
+            --install "platform-tools"
+
+      # 8. Verify SDK
+      - name: Verify Android SDK
+        shell: bash
+        run: |
+          set -e
+
+          test -d "$ANDROID_HOME/platforms/android-35"
+          test -d "$ANDROID_HOME/build-tools/35.0.0"
+          test -f "$ANDROID_HOME/platform-tools/adb"
+
+          echo "Android SDK verification successful"
+
+          echo "Installed platforms:"
+          ls "$ANDROID_HOME/platforms"
+
+          echo "Installed build tools:"
+          ls "$ANDROID_HOME/build-tools"
+
+      # 9. Gradle
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.7'
 
-      # 7. Detect project
-      - name: Detect Android project
+      # 10. Detect project
+      - name: Detect project
         shell: bash
         run: |
           set -e
@@ -67,86 +138,80 @@ jobs:
           if [ -f "app/build.gradle" ] || \
              [ -f "app/build.gradle.kts" ]; then
             PROJECT_DIR="."
-          else
-            PROJECT_FILE=$(find . -type f \
+          fi
+
+          if [ -z "$PROJECT_DIR" ]; then
+            FILE=$(find . -type f \
               \( -path "*/app/build.gradle" \
               -o -path "*/app/build.gradle.kts" \) \
               -not -path "./.git/*" \
               | head -n 1)
 
-            if [ -n "$PROJECT_FILE" ]; then
-              PROJECT_DIR=$(dirname "$(dirname "$PROJECT_FILE")")
+            if [ -n "$FILE" ]; then
+              PROJECT_DIR=$(dirname "$(dirname "$FILE")")
             fi
           fi
 
-          # Extract ZIP if Android project is not found
           if [ -z "$PROJECT_DIR" ]; then
-            ZIP_FILE=$(find . -maxdepth 3 -type f \
-              -name "*.zip" \
+            ZIP=$(find . -maxdepth 3 \
+              -type f -name "*.zip" \
               | head -n 1)
 
-            if [ -n "$ZIP_FILE" ]; then
-              echo "Extracting: $ZIP_FILE"
-
+            if [ -n "$ZIP" ]; then
               mkdir -p extracted
-              unzip -o "$ZIP_FILE" -d extracted
+              unzip -o "$ZIP" -d extracted
 
-              PROJECT_FILE=$(find extracted -type f \
+              FILE=$(find extracted -type f \
                 \( -path "*/app/build.gradle" \
                 -o -path "*/app/build.gradle.kts" \) \
                 | head -n 1)
 
-              if [ -n "$PROJECT_FILE" ]; then
-                PROJECT_DIR=$(dirname "$(dirname "$PROJECT_FILE")")
+              if [ -n "$FILE" ]; then
+                PROJECT_DIR=$(dirname "$(dirname "$FILE")")
               fi
             fi
           fi
 
           if [ -z "$PROJECT_DIR" ]; then
-            echo "ERROR: Android project not found."
-            echo "Expected app/build.gradle"
-            echo "Repository files:"
+            echo "Android project not found"
             find . -maxdepth 5 -type f
-            exit 1
-          fi
-
-          if [ ! -f "$PROJECT_DIR/settings.gradle" ] && \
-             [ ! -f "$PROJECT_DIR/settings.gradle.kts" ]; then
-            echo "ERROR: settings.gradle missing"
-            exit 1
-          fi
-
-          if [ ! -f "$PROJECT_DIR/build.gradle" ] && \
-             [ ! -f "$PROJECT_DIR/build.gradle.kts" ]; then
-            echo "ERROR: Root build.gradle missing"
             exit 1
           fi
 
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
-          echo "================================"
-          echo "Project detected successfully"
-          echo "Project: $PROJECT_DIR"
-          echo "================================"
+          echo "Project detected: $PROJECT_DIR"
 
-          find "$PROJECT_DIR" -maxdepth 4 -type f | sort
-
-      # 8. Validate Android configuration
-      - name: Validate Android configuration
+      # 11. Validate
+      - name: Validate project
+        shell: bash
         run: |
           set -e
 
           cd "$PROJECT_DIR"
 
-          test -f app/build.gradle || \
-          test -f app/build.gradle.kts
+          if [ ! -f settings.gradle ] && \
+             [ ! -f settings.gradle.kts ]; then
+            echo "settings.gradle missing"
+            exit 1
+          fi
 
-          test -f app/src/main/AndroidManifest.xml
+          if [ ! -f build.gradle ] && \
+             [ ! -f build.gradle.kts ]; then
+            echo "Root build.gradle missing"
+            exit 1
+          fi
 
-          echo "Android project validation successful."
+          if [ ! -f app/src/main/AndroidManifest.xml ]; then
+            echo "AndroidManifest.xml missing"
+            exit 1
+          fi
 
-      # 9. Build APK
-      - name: Build Debug APK
+          echo "Project validation successful"
+
+      # 12. Build
+      - name: Build APK
+        shell: bash
         run: |
           set -e
 
@@ -156,7 +221,7 @@ jobs:
             --no-daemon \
             --stacktrace
 
-      # 10. Find APK
+      # 13. Verify
       - name: Verify APK
         shell: bash
         run: |
@@ -164,35 +229,24 @@ jobs:
 
           APK=$(find "$PROJECT_DIR" \
             -type f \
-            -path "*/build/outputs/apk/debug/*.apk" \
+            -path "*/outputs/apk/debug/*.apk" \
             | head -n 1)
 
           if [ -z "$APK" ]; then
-            echo "ERROR: APK was not generated."
-            echo "Searching build outputs..."
-
-            find "$PROJECT_DIR" \
-              -type f \
-              \( -name "*.apk" \
-              -o -name "*.aab" \)
-
+            echo "APK not generated"
             exit 1
           fi
 
-          echo "APK_PATH=$APK" >> "$GITHUB_ENV"
-
-          echo "================================"
-          echo "BUILD SUCCESS"
-          echo "APK: $APK"
-          echo "================================"
-
+          echo "APK successfully generated"
           ls -lh "$APK"
 
-      # 11. Upload APK
-      - name: Upload APK Artifact
+          echo "APK_PATH=$APK" >> "$GITHUB_ENV"
+
+      # 14. Upload
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: OneSecond-Android-APK
+          name: OneSecond-APK
           path: ${{ env.APK_PATH }}
           if-no-files-found: error
           retention-days: 14
